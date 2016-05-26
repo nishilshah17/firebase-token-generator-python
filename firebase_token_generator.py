@@ -5,97 +5,89 @@ except NameError:  # Python 3
 import calendar
 import jwt
 import datetime
+import time
+
+from jwt.contrib.algorithms.pycrypto import RSAAlgorithm
+
+
+jwt.register_algorithm('RS256', RSAAlgorithm(RSAAlgorithm.SHA256))
 
 __all__ = ['create_token']
 
-CLAIMS_MAP = {
-    'expires': 'exp',
-    'notBefore': 'nbf',
-    'admin': 'admin',
-    'debug': 'debug',
-    'simulate': 'simulate'
-}
 
-
-def create_token(secret, data, options=None):
+def create_token(service_account_email, private_key, uid, claims=None):
     """
     Generates a secure authentication token.
- 
+
     Our token format follows the JSON Web Token (JWT) standard:
     header.claims.signature
-  
+
     Where:
     1) "header" is a stringified, base64-encoded JSON object containing version and algorithm information.
-    2) "claims" is a stringified, base64-encoded JSON object containing a set of claims:
-      Library-generated claims:
-      "iat" -> The issued at time in seconds since the epoch as a number
-      "d" -> The arbitrary JSON object supplied by the user.
-      User-supplied claims (these are all optional):
-      "exp" (optional) -> The expiration time of this token, as a number of seconds since the epoch.
-      "nbf" (optional) -> The "not before" time before which the token should be rejected (seconds since the epoch)
-      "admin" (optional) -> If set to true, this client will bypass all security rules (use this to authenticate servers)
-      "debug" (optional) -> "set to true to make this client receive debug information about security rule execution.
-      "simulate" (optional, internal-only for now) -> Set to true to neuter all API operations (listens / puts
-                 will run security rules but not actually write or return data).
+    2) "claims" is a stringified, base64-encoded JSON object containing a set of claims.
     3) A signature that proves the validity of this token (see: http://tools.ietf.org/html/draft-ietf-jose-json-web-signature-07)
-  
+
     For base64-encoding we use URL-safe base64 encoding. This ensures that the entire token is URL-safe
     and could, for instance, be placed as a query argument without any encoding (and this is what the JWT spec requires).
-  
+
     Args:
-        secret - the Firebase Application secret
-        data - a json serializable object of data to be included in the token
-        options - An optional dictionary of additional claims for the token. Possible keys include:
-            a) "expires" -- A datetime or timestamp (as a number of seconds since the epoch) denoting a time after
-                            which this token should no longer be valid.
-            b) "notBefore" -- A datetime or timestamp (as a number of seconds since the epoch) denoting a time before
-                            which this token should be rejected by the server.
-            c) "admin" -- Set to true to bypass all security rules (use this for your trusted servers).
-            d) "debug" -- Set to true to enable debug mode (so you can see the results of Rules API operations)
-            e) "simulate" -- (internal-only for now) Set to true to neuter all API operations (listens / puts
-                            will run security rules but not actually write or return data)
+        service_account_email - the Firebase project's service account email address
+        private_key - the Firebase project's PEM encoded private key
+        uid - the user ID that is authenticated by the generated token
+        claims - additional claims to include in the token payload
     Returns:
         A signed Firebase Authentication Token
     Raises:
-        ValueError: if an invalid key is specified in options
+        ValueError: if any argument is invalid, or a forbidden claim is found in claims.
 
     """
-    if not isinstance(secret, basestring):
-        raise ValueError("firebase_token_generator.create_token: secret must be a string.")
-    if not options and not data:
-        raise ValueError("firebase_token_generator.create_token: data is empty and no options are set.  This token will have no effect on Firebase.");
-    if not options:
-        options = {}
-    is_admin_token = ('admin' in options and options['admin'] == True)
-    _validate_data(data, is_admin_token)
-    claims = _create_claims(options, data)
+    if claims is None:
+        claims = {}
 
-    token = jwt.encode(claims, secret, algorithm='HS256').decode('ascii')
+    if not isinstance(service_account_email, basestring):
+        raise ValueError("firebase_token_generator.create_token: service_account_email must be a string.")
 
-    if len(token) > 1024:
+    if not isinstance(private_key, basestring):
+        raise ValueError("firebase_token_generator.create_token: private_key must be a string.")
+
+    if not isinstance(uid, basestring):
+        raise ValueError("firebase_token_generator.create_token: uid must be a string.")
+
+    if len(uid) > 256:
+        raise ValueError("firebase_token_generator.create_token: uid must not be longer than 256 bytes.")
+
+    _validate_claims(claims)
+    claims = _create_claims_v3(service_account_email, uid, claims)
+
+    token = jwt.encode(claims, private_key, algorithm='RS256').decode('utf8')
+
+    if len(token) > 7168:
         raise RuntimeError("firebase_token_generator.create_token: generated token is too long.")
+
     return token
 
 
-def _validate_data(data, is_admin_token):
-    if data is not None and not isinstance(data, dict):
-        raise ValueError("firebase_token_generator.create_token: data must be a dictionary")
-    contains_uid = (data is not None and 'uid' in data)
-    if (not contains_uid and not is_admin_token) or (contains_uid and not isinstance(data['uid'], basestring)):
-        raise ValueError("firebase_token_generator.create_token: data must contain a \"uid\" key that must be a string.")
-    if contains_uid and (len(data['uid']) > 256):
-        raise ValueError("firebase_token_generator.create_token: data must contain a \"uid\" key that must not be longer than 256 bytes.")
+def _validate_claims(data):
+    forbidden = ['acr', 'amr', 'at_hash', 'aud',
+                 'auth_time', 'azp', 'cnf', 'c_hash',
+                 'exp', 'firebase', 'iat', 'iss',
+                 'jti', 'nbf', 'nonce', 'sub']
+
+    for key in forbidden:
+        if key in data:
+            raise ValueError("firebase_token_generator.create_token: {} not allowed in additional claims.", key)
 
 
-def _create_claims(opts, data):
-    claims = {}
-    for k in opts:
-        if (isinstance(opts[k], datetime.datetime)):
-            opts[k] = int(calendar.timegm(opts[k].utctimetuple()))
-        if k in CLAIMS_MAP:
-            claims[CLAIMS_MAP[k]] = opts[k]
-        else:
-            raise ValueError('Unrecognized Option: %s' % k)
+def _create_claims_v3(service_account_email, uid, additional_claims):
+    iat = int(time.time())
+    exp = iat + 60 * 60
 
-    claims['d'] = data
-    return claims
+    return {
+        'iss': service_account_email,
+        'sub': service_account_email,
+        'aud': 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit',
+        'iat': iat,
+        'exp': exp,
+        'uid': uid,
+        'claims': additional_claims
+    }

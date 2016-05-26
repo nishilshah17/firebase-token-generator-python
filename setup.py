@@ -6,7 +6,7 @@ def read(fname):
 
 setup(
     name='firebase-token-generator',
-    version='2.0.1',
+    version='3.0.0',
     author='Firebase',
     author_email='support@firebase.com',
     zip_safe=False,
@@ -20,7 +20,8 @@ setup(
        'Programming Language :: Python :: 3',
     ],
     install_requires=[
-        'PyJWT'
+        'PyJWT',
+        'pycrypto'
     ],
     long_description=read('README')
 )
