@@ -2,23 +2,11 @@ try:
     basestring
 except NameError:  # Python 3
     basestring = str
-from array import array
-from base64 import urlsafe_b64encode
-import hashlib
-import hmac
-import sys
-try:
-    import json
-except ImportError:
-    import simplejson as json
 import calendar
-import time
+import jwt
 import datetime
 
 __all__ = ['create_token']
-
-TOKEN_VERSION = 0
-TOKEN_SEP = '.'
 
 CLAIMS_MAP = {
     'expires': 'exp',
@@ -27,6 +15,7 @@ CLAIMS_MAP = {
     'debug': 'debug',
     'simulate': 'simulate'
 }
+
 
 def create_token(secret, data, options=None):
     """
@@ -79,26 +68,26 @@ def create_token(secret, data, options=None):
         options = {}
     is_admin_token = ('admin' in options and options['admin'] == True)
     _validate_data(data, is_admin_token)
-    claims = _create_options_claims(options)
-    claims['v'] = TOKEN_VERSION
-    claims['iat'] = int(time.time())
-    claims['d'] = data
+    claims = _create_claims(options, data)
 
-    token = _encode_token(secret, claims)
+    token = jwt.encode(claims, secret, algorithm='HS256').decode('ascii')
+
     if len(token) > 1024:
         raise RuntimeError("firebase_token_generator.create_token: generated token is too long.")
     return token
+
 
 def _validate_data(data, is_admin_token):
     if data is not None and not isinstance(data, dict):
         raise ValueError("firebase_token_generator.create_token: data must be a dictionary")
     contains_uid = (data is not None and 'uid' in data)
-    if ((not contains_uid and not is_admin_token) or (contains_uid and not isinstance(data['uid'], basestring))):
+    if (not contains_uid and not is_admin_token) or (contains_uid and not isinstance(data['uid'], basestring)):
         raise ValueError("firebase_token_generator.create_token: data must contain a \"uid\" key that must be a string.")
-    if (contains_uid and (len(data['uid']) > 256)):
+    if contains_uid and (len(data['uid']) > 256):
         raise ValueError("firebase_token_generator.create_token: data must contain a \"uid\" key that must not be longer than 256 bytes.")
 
-def _create_options_claims(opts):
+
+def _create_claims(opts, data):
     claims = {}
     for k in opts:
         if (isinstance(opts[k], datetime.datetime)):
@@ -107,33 +96,6 @@ def _create_options_claims(opts):
             claims[CLAIMS_MAP[k]] = opts[k]
         else:
             raise ValueError('Unrecognized Option: %s' % k)
+
+    claims['d'] = data
     return claims
-
-if sys.version_info < (2, 7):
-    def _encode(bytes_data):
-        # Python 2.6 has problems with bytearrays in b64
-        encoded = urlsafe_b64encode(bytes(bytes_data))
-        return encoded.decode('utf-8').replace('=', '')
-else:
-    def _encode(bytes):
-        encoded = urlsafe_b64encode(bytes)
-        return encoded.decode('utf-8').replace('=', '')
-
-
-def _encode_json(obj):
-    return _encode(bytearray(json.dumps(obj, separators=(',',':')), 'utf-8'))
-
-def _sign(secret, to_sign):
-    def portable_bytes(s):
-        try:
-            return bytes(s, 'utf-8')
-        except TypeError:
-            return bytes(s)
-    return _encode(hmac.new(portable_bytes(secret), portable_bytes(to_sign), hashlib.sha256).digest())
-
-def _encode_token(secret, claims):
-    encoded_header = _encode_json({'typ': 'JWT', 'alg': 'HS256'})
-    encoded_claims = _encode_json(claims)
-    secure_bits = '%s%s%s' % (encoded_header, TOKEN_SEP, encoded_claims)
-    sig = _sign(secret, secure_bits)
-    return '%s%s%s' % (secure_bits, TOKEN_SEP, sig)
